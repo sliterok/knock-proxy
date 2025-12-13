@@ -14,6 +14,10 @@ Clients are allowed if either:
 - `pnpm run build`
 - `pnpm start`
 
+Run with PM2 (after building):
+- `pm2 start pnpm --name "knock-proxy" -- start`
+- `pnpm reinit` on next builds
+
 Unlock your current IP:
 - `curl -X POST "http://127.0.0.1:3000/unlock"`
 
@@ -68,3 +72,34 @@ By default:
 - `ALLOWLIST_MAX_PER_SUBNET` (default `100`)
 - `ALLOWLIST_SUBNET_STALE_SEC` (default `604800`)
 
+## Dante example config
+
+Minimal `danted.conf` example to only allow local clients (i.e. `knock-proxy`) to use Dante:
+
+```conf
+internal: 127.0.0.1 port = 1081 # Your DANTE_PORT
+external: ens3 # or eth0, check with "ip route show default"
+
+clientmethod: none
+socksmethod: none
+
+user.privileged: root
+user.notprivileged: nobody
+
+# Only allow local clients (i.e. knock-proxy)
+client pass {
+  from: 127.0.0.1/32 to: 0.0.0.0/0
+  log: error
+}
+client block {
+  from: 0.0.0.0/0 to: 0.0.0.0/0
+  log: error
+}
+
+# Allow proxying (gate does the auth)
+pass {
+  from: 127.0.0.1/32 to: 0.0.0.0/0
+  command: connect bind
+  log: error
+}
+```

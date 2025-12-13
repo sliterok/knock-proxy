@@ -3,10 +3,10 @@ type GeoipLookupResult = { country?: string } | null;
 type GeoipLiteModule = { lookup: (ip: string) => GeoipLookupResult };
 
 async function loadGeoipLite(): Promise<GeoipLiteModule> {
-    const mod = await import("geoip-lite");
+    const mod = await import("geoip-country");
     const geoip = (mod as unknown as { default?: unknown }).default ?? mod;
     if (!geoip || typeof geoip !== "object" || typeof (geoip as GeoipLiteModule).lookup !== "function") {
-        throw new Error("geoip-lite module missing lookup()");
+        throw new Error("geoip-country module missing lookup()");
     }
     return geoip as GeoipLiteModule;
 }

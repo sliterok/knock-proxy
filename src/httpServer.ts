@@ -23,7 +23,7 @@ export function startHttpServer(opts: { config: AppConfig; allowList: AllowList 
     const publicDir = path.resolve(process.cwd(), "public");
     app.use(express.static(publicDir));
 
-    app.get("/unlock", (req, res) => {
+    app.post("/unlock", (req, res) => {
         const ttl = parseTtlQuery(req.query?.ttl, config.defaultTtlSec);
         const ip = normalizeIp(req.ip);
 

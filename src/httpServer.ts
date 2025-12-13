@@ -7,14 +7,6 @@ import type { AllowList } from "./allowList";
 import type { GeoFence } from "./geoFence";
 import { normalizeIp } from "./ip";
 
-function parseTtlQuery(raw: unknown, fallback: number) {
-    if (typeof raw === "string" && raw.trim() !== "") {
-        const n = Number(raw);
-        if (Number.isFinite(n)) return n;
-    }
-    return fallback;
-}
-
 export function startHttpServer(opts: { config: AppConfig; allowList: AllowList | null; geoFence: GeoFence | null }) {
     const { config, allowList, geoFence } = opts;
 
@@ -25,31 +17,19 @@ export function startHttpServer(opts: { config: AppConfig; allowList: AllowList 
     app.use(express.static(publicDir));
 
     app.post("/unlock", (req, res) => {
-        if (config.accessMode === "geoip") {
-            return res.status(409).type("text/plain").send("unlock disabled (ACCESS_MODE=geoip)\n");
-        }
-
-        const ttl = parseTtlQuery(req.query?.ttl, config.defaultTtlSec);
         const ip = normalizeIp(req.ip);
 
         if (!ip) return res.status(400).type("text/plain").send("no ip\n");
 
-        if (config.accessMode !== "allowlist" && (!geoFence || !geoFence.isAllowed(ip))) {
-            const cc = geoFence?.countryForIp(ip) ?? "unknown";
-            const accept = req.accepts(["text", "json"]);
-            if (accept === "json") return res.status(403).json({ ok: false, ip, country: cc });
-            return res.status(403).type("text/plain").send(`forbidden (country=${cc})\n`);
-        }
-
         if (!allowList) return res.status(500).type("text/plain").send("allowList not configured\n");
-        const grantedTtlSec = allowList.allowIp(ip, ttl);
+        allowList.allowIp(ip);
 
         const accept = req.accepts(["text", "json"]);
         if (accept === "json") {
-            return res.status(200).json({ ok: true, ip, grantedTtlSec });
+            return res.status(200).json({ ok: true, ip, country: geoFence?.countryForIp(ip) ?? null });
         }
 
-        return res.status(200).type("text/plain").send(`OK. allowed ${ip} for ${grantedTtlSec}s\n`);
+        return res.status(200).type("text/plain").send(`OK. allowed ${ip}\n`);
     });
 
     const httpServer = http.createServer(app);

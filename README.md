@@ -1,35 +1,35 @@
 # knock-proxy
 
-TCP gate in front of an upstream proxy (e.g. Dante). Connections are allowed by either:
-- a temporary IP allow-list unlocked via HTTP (`/unlock`), and/or
-- GeoIP country allow-list (local lookup via `geoip-lite`).
+TCP gate in front of an upstream proxy (e.g. Dante).
+
+## How access works
+
+Clients are allowed if **either**:
+- their IP was unlocked via `POST /unlock` (persistent allow-list), or
+- their GeoIP country is in `ALLOW_COUNTRIES` (when GeoIP is enabled).
 
 ## Usage
 
-Install deps:
 - `pnpm install`
-
-Build + run:
 - `pnpm run build`
 - `pnpm start`
 
-Unlock (when enabled):
-- `curl -X POST "http://127.0.0.1:3000/unlock?ttl=600"`
+Unlock your current IP:
+- `curl -X POST "http://127.0.0.1:3000/unlock"`
 
-## Access modes
+## GeoIP
 
-Set `ACCESS_MODE`:
-- `allowlist` (default): TCP gate requires the IP to be unlocked via `/unlock`.
-- `geoip`: TCP gate allows by GeoIP only; `/unlock` is disabled.
-- `both`: TCP gate requires *both* an unlocked IP and an allowed GeoIP country. `/unlock` will only work from allowed countries.
-
-For `geoip`/`both`, set `ALLOW_COUNTRIES` (ISO-3166-1 alpha-2, comma/space separated), or `*` to allow all:
+Enable GeoIP by setting `ALLOW_COUNTRIES` (ISO-3166-1 alpha-2, comma/space separated), or `*` to allow all:
 - `ALLOW_COUNTRIES=US,CA`
 - `ALLOW_COUNTRIES=*`
 
+`ACCESS_MODE`:
+- `allowlist` (default when `ALLOW_COUNTRIES` is empty): allow-list only.
+- `geoip` or `both` (default when `ALLOW_COUNTRIES` is set): GeoIP **or** allow-list.
+
 ## Persistent allow-list (ring buffer per subnet)
 
-When `ACCESS_MODE` is `allowlist` or `both`, unlocked IPs are persisted to disk:
+Unlocked IPs are stored on disk and survive restarts:
 - `ALLOWLIST_PATH` (default `data/allowList.json`)
 - max `ALLOWLIST_MAX_PER_SUBNET` entries per subnet (default `100`)
 - subnets idle for `ALLOWLIST_SUBNET_STALE_SEC` seconds are dropped (default `604800` / 7 days)
@@ -44,8 +44,6 @@ By default:
 - HTTP unlock server binds to `127.0.0.1` (intended to sit behind a reverse proxy): `HTTP_BIND_HOST`
 - TCP gate binds to `0.0.0.0` (public): `TCP_BIND_HOST`
 
-`BIND_HOST` is still supported as a legacy fallback for both.
-
 ## Environment variables
 
 - `PROXY_PUBLIC_PORT` (default `1080`)
@@ -55,9 +53,8 @@ By default:
 - `HTTP_PORT` (default `3000`)
 - `HTTP_BIND_HOST` (default `127.0.0.1`)
 - `TRUST_PROXY` (default `true`) – respects `X-Forwarded-For` for `/unlock`
-- `DEFAULT_TTL_SEC` (default `1200`) – default unlock TTL (bounded to `10s..7d`)
-- `ACCESS_MODE` (default `allowlist`)
-- `ALLOW_COUNTRIES` (required for `geoip`/`both`)
+- `ACCESS_MODE` (default depends on `ALLOW_COUNTRIES`)
+- `ALLOW_COUNTRIES` (enables GeoIP when set)
 - `ALLOWLIST_PATH` (default `data/allowList.json`)
 - `ALLOWLIST_MAX_PER_SUBNET` (default `100`)
 - `ALLOWLIST_SUBNET_STALE_SEC` (default `604800`)

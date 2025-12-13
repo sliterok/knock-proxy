@@ -15,12 +15,13 @@ export function startTcpGate(opts: { config: AppConfig; allowList: AllowList | n
             return;
         }
 
-        if (config.accessMode !== "geoip" && (!allowList || !allowList.isAllowed(ip))) {
-            client.destroy();
-            return;
-        }
+        const allowedByAllowList = !!allowList && allowList.isAllowed(ip);
+        const allowedByGeo = !!geoFence && geoFence.isAllowed(ip);
 
-        if (config.accessMode !== "allowlist" && (!geoFence || !geoFence.isAllowed(ip))) {
+        const allowed =
+            config.accessMode === "allowlist" ? allowedByAllowList : allowedByAllowList || allowedByGeo;
+
+        if (!allowed) {
             client.destroy();
             return;
         }

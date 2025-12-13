@@ -2,11 +2,10 @@ import fs from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
 
-export type AllowEntry = { ip: string; expiresAt: number; lastUsedAt: number };
+export type AllowEntry = { ip: string; lastUsedAt: number };
 type SubnetBucket = { lastUsedAt: number; entries: AllowEntry[] };
 
-type PersistedAllowListV1 = {
-    version: 1;
+type PersistedAllowList = {
     updatedAt: number;
     subnets: Record<string, { lastUsedAt: number; entries: AllowEntry[] }>;
 };
@@ -146,27 +145,37 @@ export class AllowList {
         if (!this.persistPath) return;
         try {
             const raw = await fs.readFile(this.persistPath, "utf8");
-            const parsed = JSON.parse(raw) as PersistedAllowListV1;
-            if (!parsed || parsed.version !== 1 || typeof parsed.subnets !== "object") return;
+            const parsed = JSON.parse(raw) as unknown;
+            if (!parsed || typeof parsed !== "object") return;
 
             const now = this.nowMs();
-            for (const [k, v] of Object.entries(parsed.subnets)) {
-                if (!v || typeof v !== "object" || !Array.isArray(v.entries)) continue;
-                const entries = v.entries
-                    .filter((e) => e && typeof e.ip === "string" && Number.isFinite(e.expiresAt))
-                    .map((e) => ({
-                        ip: e.ip,
-                        expiresAt: Number(e.expiresAt),
-                        lastUsedAt: Number.isFinite(e.lastUsedAt) ? Number(e.lastUsedAt) : now,
-                    }))
-                    .filter((e) => e.expiresAt > now);
+            const subnets = (parsed as { subnets?: unknown }).subnets;
+            if (!subnets || typeof subnets !== "object") return;
 
+            for (const [k, rawSubnet] of Object.entries(subnets as Record<string, unknown>)) {
+                if (!rawSubnet || typeof rawSubnet !== "object") continue;
+                const rawEntries = (rawSubnet as { entries?: unknown }).entries;
+                if (!Array.isArray(rawEntries)) continue;
+
+                const entries: AllowEntry[] = [];
+                for (const e of rawEntries) {
+                    if (!e || typeof e !== "object") continue;
+                    const ip = (e as { ip?: unknown }).ip;
+                    if (typeof ip !== "string" || ip.trim() === "") continue;
+                    const lastUsedAtRaw = (e as { lastUsedAt?: unknown }).lastUsedAt;
+                    const lastUsedAt = Number.isFinite(lastUsedAtRaw as number) ? Number(lastUsedAtRaw) : now;
+                    entries.push({ ip, lastUsedAt });
+                }
                 if (entries.length === 0) continue;
 
-                const trimmed = entries.length > this.maxEntriesPerSubnet ? entries.slice(-this.maxEntriesPerSubnet) : entries;
-                const lastUsedAt =
-                    Number.isFinite(v.lastUsedAt) && Number(v.lastUsedAt) > 0 ? Number(v.lastUsedAt) : now;
+                const rawSubnetLastUsedAt = (rawSubnet as { lastUsedAt?: unknown }).lastUsedAt;
+                const subnetLastUsedAt = Number.isFinite(rawSubnetLastUsedAt as number) ? Number(rawSubnetLastUsedAt) : 0;
+                const entriesMaxLastUsedAt = entries.reduce((acc, e) => Math.max(acc, e.lastUsedAt), 0);
+                const lastUsedAt = Math.max(subnetLastUsedAt, entriesMaxLastUsedAt, 0) || now;
 
+                if (now - lastUsedAt > this.subnetStaleMs) continue;
+
+                const trimmed = entries.length > this.maxEntriesPerSubnet ? entries.slice(-this.maxEntriesPerSubnet) : entries;
                 this.subnets.set(k, { lastUsedAt, entries: trimmed });
             }
 
@@ -194,10 +203,10 @@ export class AllowList {
         tryUnrefTimer(this.persistTimer);
     }
 
-    private snapshot(): PersistedAllowListV1 {
-        const subnets: PersistedAllowListV1["subnets"] = {};
+    private snapshot(): PersistedAllowList {
+        const subnets: PersistedAllowList["subnets"] = {};
         for (const [k, v] of this.subnets) subnets[k] = { lastUsedAt: v.lastUsedAt, entries: v.entries };
-        return { version: 1, updatedAt: this.nowMs(), subnets };
+        return { updatedAt: this.nowMs(), subnets };
     }
 
     private async flushToDisk() {
@@ -245,10 +254,6 @@ export class AllowList {
         let changed = false;
 
         const gcSubnet = (key: string, subnet: SubnetBucket) => {
-            const before = subnet.entries.length;
-            subnet.entries = subnet.entries.filter((e) => e.expiresAt > now);
-            if (subnet.entries.length !== before) changed = true;
-
             if (subnet.entries.length === 0 || now - subnet.lastUsedAt > this.subnetStaleMs) {
                 this.subnets.delete(key);
                 changed = true;
@@ -292,13 +297,6 @@ export class AllowList {
         if (foundIdx < 0) return false;
 
         const entry = subnet.entries[foundIdx]!;
-        if (entry.expiresAt <= now) {
-            subnet.entries.splice(foundIdx, 1);
-            if (subnet.entries.length === 0) this.subnets.delete(key);
-            this.markDirty(1000);
-            return false;
-        }
-
         entry.lastUsedAt = now;
         this.touchUsage(subnet, false);
 
@@ -311,10 +309,8 @@ export class AllowList {
         return true;
     }
 
-    allowIp(ip: string, ttlSec: number) {
-        const ttl = Math.max(10, Math.min(ttlSec, 7 * 24 * 60 * 60)); // 10s..7d
+    allowIp(ip: string) {
         const now = this.nowMs();
-        const expiresAt = now + ttl * 1000;
 
         const key = subnetKey(ip);
         const subnet = this.subnets.get(key) ?? { lastUsedAt: now, entries: [] };
@@ -328,7 +324,7 @@ export class AllowList {
             }
         }
 
-        const entry: AllowEntry = { ip, expiresAt, lastUsedAt: now };
+        const entry: AllowEntry = { ip, lastUsedAt: now };
         if (foundIdx >= 0) subnet.entries.splice(foundIdx, 1);
         subnet.entries.push(entry);
 
@@ -338,6 +334,5 @@ export class AllowList {
 
         this.subnets.set(key, subnet);
         this.touchUsage(subnet, true);
-        return ttl;
     }
 }

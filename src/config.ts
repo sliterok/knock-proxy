@@ -2,7 +2,6 @@ export type AppConfig = {
     proxyPublicPort: number;
     danteHost: string;
     dantePort: number;
-    defaultTtlSec: number;
     httpPort: number;
     httpBindHost: string;
     tcpBindHost: string;
@@ -38,6 +37,7 @@ function parseBool(raw: string | undefined, fallback: boolean) {
 
 function parseAccessMode(raw: string | undefined): AppConfig["accessMode"] {
     const s = raw?.trim().toLowerCase();
+    if (s === "allowlist") return "allowlist";
     if (s === "geoip") return "geoip";
     if (s === "both") return "both";
     return "allowlist";
@@ -55,13 +55,13 @@ export function loadConfig(env = process.env): AppConfig {
     const proxyPublicPort = parsePort(env.PROXY_PUBLIC_PORT, 1080);
     const danteHost = env.DANTE_HOST ?? "127.0.0.1";
     const dantePort = parsePort(env.DANTE_PORT, 1081);
-    const defaultTtlSec = parseIntOrFallback(env.DEFAULT_TTL_SEC, 20 * 60);
     const httpPort = parsePort(env.HTTP_PORT, 3000);
     const httpBindHost = env.HTTP_BIND_HOST ?? "127.0.0.1";
     const tcpBindHost = env.TCP_BIND_HOST ?? "0.0.0.0";
     const trustProxy = parseBool(env.TRUST_PROXY, true);
-    const accessMode = parseAccessMode(env.ACCESS_MODE);
     const allowCountries = parseCountryList(env.ALLOW_COUNTRIES);
+    const accessMode =
+        env.ACCESS_MODE !== undefined ? parseAccessMode(env.ACCESS_MODE) : allowCountries.length > 0 ? "both" : "allowlist";
     const allowListPath = env.ALLOWLIST_PATH ?? "data/allowList.json";
     const allowListMaxPerSubnet = parseIntOrFallback(env.ALLOWLIST_MAX_PER_SUBNET, 100);
     const allowListSubnetStaleMs = parseIntOrFallback(env.ALLOWLIST_SUBNET_STALE_SEC, 7 * 24 * 60 * 60) * 1000;
@@ -70,7 +70,6 @@ export function loadConfig(env = process.env): AppConfig {
         proxyPublicPort,
         danteHost,
         dantePort,
-        defaultTtlSec,
         httpPort,
         httpBindHost,
         tcpBindHost,

@@ -9,24 +9,18 @@ import { startTcpGate } from "./tcpGate";
 async function main() {
     const config = loadConfig();
 
-    const needsAllowList = config.accessMode !== "geoip";
-    const needsGeoFence = config.accessMode !== "allowlist";
-
-    const allowList = needsAllowList
-        ? new AllowList({
+    const allowList = new AllowList({
             persistPath: config.allowListPath,
             maxEntriesPerSubnet: config.allowListMaxPerSubnet,
             subnetStaleMs: config.allowListSubnetStaleMs,
-        })
-        : null;
+        });
 
-    if (allowList) {
-        await allowList.loadFromDisk();
-        setInterval(() => allowList.gc(), config.gcIntervalMs).unref();
-    }
+    await allowList.loadFromDisk();
+    setInterval(() => allowList.gc(), config.gcIntervalMs).unref();
 
-    const geoFence = needsGeoFence ? await GeoFence.create(config.allowCountries) : null;
-    if (needsGeoFence && !geoFence) {
+    const wantsGeoFence = config.accessMode !== "allowlist";
+    const geoFence = wantsGeoFence ? await GeoFence.create(config.allowCountries) : null;
+    if (wantsGeoFence && !geoFence) {
         throw new Error("ACCESS_MODE requires GeoIP, but ALLOW_COUNTRIES is empty");
     }
 

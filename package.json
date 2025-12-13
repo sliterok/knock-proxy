@@ -7,7 +7,7 @@
   "scripts": {
     "build": "node esbuild.mjs",
     "start": "node dist/index.js",
-    "reinit": "pm2 restart news-connector --update-env"
+    "reinit": "pm2 restart knock-proxy --update-env"
   },
   "keywords": [],
   "author": "",

@@ -4,7 +4,7 @@ TCP gate in front of an upstream proxy (e.g. Dante).
 
 ## How access works
 
-Clients are allowed if **either**:
+Clients are allowed if either:
 - their IP was unlocked via `POST /unlock` (persistent allow-list), or
 - their GeoIP country is in `ALLOW_COUNTRIES` (when GeoIP is enabled).
 
@@ -16,6 +16,15 @@ Clients are allowed if **either**:
 
 Unlock your current IP:
 - `curl -X POST "http://127.0.0.1:3000/unlock"`
+
+## Frontend page
+
+The server serves a small static page from `public/index.html` at `/`.
+
+Open (defaults):
+- `http://127.0.0.1:3000/`
+
+Clicking "Knock" triggers `POST /unlock` for your current IP.
 
 ## GeoIP
 
@@ -52,7 +61,7 @@ By default:
 - `DANTE_PORT` (default `1081`)
 - `HTTP_PORT` (default `3000`)
 - `HTTP_BIND_HOST` (default `127.0.0.1`)
-- `TRUST_PROXY` (default `true`) – respects `X-Forwarded-For` for `/unlock`
+- `TRUST_PROXY` (default `true`) - respects `X-Forwarded-For` for `/unlock`
 - `ACCESS_MODE` (default depends on `ALLOW_COUNTRIES`)
 - `ALLOW_COUNTRIES` (enables GeoIP when set)
 - `ALLOWLIST_PATH` (default `data/allowList.json`)

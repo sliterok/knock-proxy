@@ -4,7 +4,7 @@ import https from "node:https";
 import path from "node:path";
 
 // @ts-ignore
-import Greenlock from "@root/greenlock";
+import Greenlock from "greenlock";
 // @ts-ignore
 import CloudflareChallenge from "acme-dns-01-cloudflare";
 

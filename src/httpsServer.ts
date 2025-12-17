@@ -1,5 +1,7 @@
+// @ts-ignore
+import Greenlock from "greenlock";
+import GreenlockStore from "greenlock-store-fs"
 import express from "express";
-import type { Request, Response } from "express";
 import https from "node:https";
 import path from "node:path";
 import dns from "node:dns";

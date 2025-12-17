@@ -5,7 +5,7 @@ import path from "node:path";
 
 
 // @ts-ignore
-import Greenlock from "greenlock"
+import Greenlock from "@root/greenlock"
 import GreenlockExpress from "greenlock-express"
 // @ts-ignore
 import CloudflareChallenge from "acme-dns-01-cloudflare"
@@ -86,10 +86,7 @@ interface GreenlockInstance {
 }
 
 type ServerOptions = {
-    config: AppConfig & {
-        email: string;
-        cloudflareToken: string;
-    };
+    config: AppConfig
     allowList: AllowList | null;
     geoFence: GeoFence | null;
 };
@@ -113,7 +110,7 @@ export async function startServer(opts: ServerOptions) {
     // 2. MANAGEMENT PHASE (Fix: Await the creation)
     if (allowedHostPatterns.length > 0) {
         // Greenlock.create() returns a Promise in v4!
-        const gl = await Greenlock.create({
+        const gl = Greenlock.create({
             packageRoot: process.cwd(),
             configDir: "./greenlock.d",
             maintainerEmail: config.email,

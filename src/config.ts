@@ -4,6 +4,7 @@ export type AppConfig = {
     dantePort: number;
     httpPort: number;
     httpBindHost: string;
+    httpAllowedHosts: string[]; // empty = allow all (Host / X-Forwarded-Host)
     tcpBindHost: string;
     trustProxy: boolean;
     gcIntervalMs: number;
@@ -51,12 +52,32 @@ function parseCountryList(raw: string | undefined): string[] {
         .filter((s) => s !== "");
 }
 
+function normalizeHostPattern(raw: string): string {
+    let s = raw.trim().toLowerCase();
+    s = s.replace(/^https?:\/\//, "");
+    const slashIdx = s.indexOf("/");
+    if (slashIdx >= 0) s = s.slice(0, slashIdx);
+    s = s.replace(/\.+$/, "");
+    return s;
+}
+
+function parseHostList(raw: string | undefined): string[] {
+    if (!raw) return [];
+    const out = raw
+        .split(/[,\s]+/g)
+        .map((s) => normalizeHostPattern(s))
+        .filter((s) => s !== "");
+    if (out.includes("*")) return [];
+    return out;
+}
+
 export function loadConfig(env = process.env): AppConfig {
     const proxyPublicPort = parsePort(env.PROXY_PUBLIC_PORT, 1080);
     const danteHost = env.DANTE_HOST ?? "127.0.0.1";
     const dantePort = parsePort(env.DANTE_PORT, 1081);
     const httpPort = parsePort(env.HTTP_PORT, 3000);
     const httpBindHost = env.HTTP_BIND_HOST ?? "127.0.0.1";
+    const httpAllowedHosts = parseHostList(env.HTTP_ALLOWED_HOSTS);
     const tcpBindHost = env.TCP_BIND_HOST ?? "0.0.0.0";
     const trustProxy = parseBool(env.TRUST_PROXY, true);
     const allowCountries = parseCountryList(env.ALLOW_COUNTRIES);
@@ -72,6 +93,7 @@ export function loadConfig(env = process.env): AppConfig {
         dantePort,
         httpPort,
         httpBindHost,
+        httpAllowedHosts,
         tcpBindHost,
         trustProxy,
         gcIntervalMs: 30_000,

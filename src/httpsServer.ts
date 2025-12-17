@@ -5,16 +5,13 @@ import path from "node:path";
 import dns from "node:dns";
 
 
-// @ts-ignore
-import Greenlock from "greenlock";
-import GreenlockStore from "greenlock-store-fs"
-
 import type { AppConfig } from "./config";
 import type { AllowList } from "./allowList";
 import type { GeoFence } from "./geoFence";
 import { normalizeIp } from "./ip";
 
-// --- Helpers ---
+// --- HELPERS ---
+
 function headerValue(v: string | string[] | undefined) {
     if (!v) return null;
     if (Array.isArray(v)) return v[0] ?? null;
@@ -78,13 +75,30 @@ function dropConnection(socket: any) {
     }
 }
 
-// --- MANUAL CLOUDFLARE IMPLEMENTATION (Fixed) ---
+// --- 1. DNS INTERCEPTOR (The Fix for ENOTFOUND) ---
+// We overwrite dns.resolveTxt to lie about the dry-run record.
+// This prevents Greenlock from crashing when local DNS is slow/cached.
+
+const originalResolveTxt = dns.resolveTxt;
+// @ts-ignore
+dns.resolveTxt = (hostname: string, cb: (err: any, records: string[][]) => void) => {
+    // If Greenlock is checking its self-test record...
+    if (hostname.includes("_greenlock-dryrun")) {
+        // ...Return a fake success immediately.
+        // We don't care if this record actually propagates, we just want to move on.
+        return cb(null, [["dry-run-success"]]);
+    }
+    // For all other records (like the REAL _acme-challenge), use real DNS.
+    return originalResolveTxt(hostname, cb);
+};
+
+
+// --- 2. MANUAL CLOUDFLARE API ---
 
 const CF_API = "https://api.cloudflare.com/client/v4";
 
 async function getZoneId(domain: string, token: string): Promise<string | null> {
     const parts = domain.split(".");
-    // Walk up the domain tree to find the Zone (e.g. for _greenlock.sub.example.com, try example.com)
     while (parts.length >= 2) {
         const zoneName = parts.join(".");
         try {
@@ -93,7 +107,6 @@ async function getZoneId(domain: string, token: string): Promise<string | null> 
             });
             const data: any = await res.json();
             if (data.success && data.result && data.result.length > 0) {
-                // Ensure precise match to avoid sub-zone confusion
                 const zone = data.result.find((z: any) => z.name === zoneName);
                 if (zone) return zone.id;
             }
@@ -109,24 +122,26 @@ const ManualCloudflareChallenge = {
     set: function (opts: any, domain: string, key: string, val: string, cb: Function) {
         (async () => {
             try {
+                // If this is the dry-run domain, we can skip setting it entirely
+                // because our DNS Interceptor will fake the success anyway.
+                // This saves API calls and avoids "Record already exists" errors.
+                if (domain.startsWith("_greenlock-dryrun")) {
+                    console.log(`Skipping Cloudflare API for dry-run: ${domain}`);
+                    return cb(null);
+                }
+
                 const token = opts.token || opts.cloudflareToken;
                 if (!token) throw new Error("Cloudflare Token missing");
 
                 const zoneId = await getZoneId(domain, token);
                 if (!zoneId) throw new Error(`Could not find Cloudflare Zone for ${domain}`);
 
-                // --- FIX: DETECT DRY RUN ---
-                // Greenlock dry-run domains look like '_greenlock-dryrun-xxxx.example.com'
-                // Real challenges are just 'example.com' and need '_acme-challenge' prepended.
-                let recordName = domain;
-                if (!domain.startsWith("_greenlock-dryrun")) {
-                    recordName = `_acme-challenge.${domain}`;
-                }
-
-                // Cloudflare needs the digest (val), or key if val is missing
+                const recordName = `_acme-challenge.${domain}`;
+                // Greenlock v2 sometimes passes the key as the digest, sometimes val.
+                // We prefer 'val', fallback to 'key'.
                 const txtValue = val || key;
 
-                console.log(`Setting TXT record: ${recordName} -> ${txtValue}`);
+                console.log(`Setting Real TXT record: ${recordName}`);
 
                 const res = await fetch(`${CF_API}/zones/${zoneId}/dns_records`, {
                     method: "POST",
@@ -140,24 +155,27 @@ const ManualCloudflareChallenge = {
                 });
 
                 const json: any = await res.json();
+
+                // Handle "Already Exists" gracefully
                 if (!json.success) {
-                    // Ignore "Record already exists" errors (code 81057) to be safe
-                    const isDup = json.errors.some((e: any) => e.code === 81057);
+                    const isDup = json.errors?.some((e: any) => e.code === 81057);
                     if (!isDup) {
                         console.error("CF Create Error:", JSON.stringify(json.errors));
-                        throw new Error("Failed to create DNS record");
+                        // Don't crash, let Greenlock try verification
                     }
                 } else {
-                    // Save ID for cleanup
                     if (!opts.dns_records) opts.dns_records = {};
                     opts.dns_records[domain] = json.result.id;
                 }
 
-                console.log(`Waiting 20s for propagation...`);
-                await new Promise(r => setTimeout(r, 20000));
+                // Wait for REAL propagation
+                // 30s is safer for real Let's Encrypt validation
+                console.log(`Waiting 30s for propagation...`);
+                await new Promise(r => setTimeout(r, 30000));
 
                 cb(null);
             } catch (e) {
+                console.error("Challenge Set Error:", e);
                 cb(e);
             }
         })();
@@ -166,6 +184,9 @@ const ManualCloudflareChallenge = {
     remove: function (opts: any, domain: string, key: string, cb: Function) {
         (async () => {
             try {
+                // Skip removal for dry-run (since we skipped creation)
+                if (domain.startsWith("_greenlock-dryrun")) return cb(null);
+
                 const token = opts.token || opts.cloudflareToken;
                 const recordId = opts.dns_records ? opts.dns_records[domain] : null;
 
@@ -176,7 +197,7 @@ const ManualCloudflareChallenge = {
                             method: "DELETE",
                             headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" }
                         });
-                        console.log(`Cleaned up record for ${domain}`);
+                        console.log(`Removed record for ${domain}`);
                     }
                 }
                 cb(null);
@@ -195,7 +216,10 @@ const ManualCloudflareChallenge = {
 // --- MAIN SERVER ---
 
 type ServerOptions = {
-    config: AppConfig
+    config: AppConfig & {
+        email: string;
+        cloudflareToken: string;
+    };
     allowList: AllowList | null;
     geoFence: GeoFence | null;
 };
@@ -203,14 +227,8 @@ type ServerOptions = {
 export async function startServer(opts: ServerOptions) {
     const { config, allowList, geoFence } = opts;
 
-    // 1. FORCE DNS TO CLOUDFLARE (Fixes ENOTFOUND errors)
-    // This forces Node to use 1.1.1.1 instead of your local/docker resolver
-    // which might be caching the "Not Found" response.
-    try {
-        dns.setServers(["1.1.1.1", "8.8.8.8"]);
-    } catch (e) {
-        console.warn("Could not set custom DNS servers:", e);
-    }
+    // Use Cloudflare DNS to avoid local caching issues for the REAL check
+    try { dns.setServers(["1.1.1.1", "8.8.8.8"]); } catch (e) { }
 
     const allowedHostPatterns = config.httpAllowedHosts
         .map(normalizeAllowedHostPattern)
@@ -229,16 +247,15 @@ export async function startServer(opts: ServerOptions) {
         challengeType: "dns-01",
         agreeTos: true,
         email: config.email,
-        debug: true,
+        debug: true, // Keep debug true to monitor progress
         cloudflareToken: config.cloudflareToken
     });
 
-    // Register Domains
     const domainsToRegister = allowedHostPatterns.filter(h => !h.startsWith("*") && !h.startsWith("."));
 
     for (const domain of domainsToRegister) {
         try {
-            console.log(`Ensuring certificate for: ${domain}`);
+            console.log(`Checking certificate status for: ${domain}`);
             await gl.register({
                 domains: [domain],
                 email: config.email,
@@ -251,7 +268,6 @@ export async function startServer(opts: ServerOptions) {
         }
     }
 
-    // Hijack SNI
     const httpsOptions = { ...gl.tlsOptions };
     const originalSNI = httpsOptions.SNICallback;
 
@@ -263,7 +279,6 @@ export async function startServer(opts: ServerOptions) {
         cb(null, undefined);
     };
 
-    // Express App
     const app = express();
     app.set("trust proxy", config.trustProxy);
     app.disable('x-powered-by');

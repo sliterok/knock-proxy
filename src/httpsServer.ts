@@ -3,19 +3,18 @@ import type { Request, Response } from "express";
 import https from "node:https";
 import path from "node:path";
 
-
 // @ts-ignore
-import Greenlock from "@root/greenlock"
-import GreenlockExpress from "greenlock-express"
+import Greenlock from "@root/greenlock";
+import GreenlockExpress from "greenlock-express";
 // @ts-ignore
-import CloudflareChallenge from "acme-dns-01-cloudflare"
+import CloudflareChallenge from "acme-dns-01-cloudflare";
 
 import type { AppConfig } from "./config";
 import type { AllowList } from "./allowList";
 import type { GeoFence } from "./geoFence";
 import { normalizeIp } from "./ip";
 
-// --- Helpers (Same as before) ---
+// --- Helpers ---
 function headerValue(v: string | string[] | undefined) {
     if (!v) return null;
     if (Array.isArray(v)) return v[0] ?? null;
@@ -79,6 +78,45 @@ function dropConnection(socket: any) {
     }
 }
 
+// --- COMPATIBILITY WRAPPER (Fixes the undefined.undefined error) ---
+function wrapLegacyDnsChallenge(legacyInstance: any) {
+    return {
+        // Greenlock v4 calls 'init', legacy doesn't need it but we must provide it
+        init: async () => { return null; },
+
+        // Greenlock v4 passes a single object; Legacy expects (opts, domain, key, val, cb)
+        set: async (opts: any) => {
+            const domain = opts.identifier.value;         // e.g. "example.com"
+            const challengeKey = opts.challenge.dnsHost;  // e.g. "_acme-challenge.example.com"
+            const keyAuthorization = opts.challenge.keyAuthorization;
+
+            return new Promise<void>((resolve, reject) => {
+                // We pass {} as the first 'opts' arg to legacy, it usually ignores it
+                legacyInstance.set({}, domain, challengeKey, keyAuthorization, (err: any) => {
+                    if (err) reject(err);
+                    else resolve();
+                });
+            });
+        },
+
+        // Legacy expected (opts, domain, key, cb)
+        remove: async (opts: any) => {
+            const domain = opts.identifier.value;
+            const challengeKey = opts.challenge.dnsHost;
+
+            return new Promise<void>((resolve, reject) => {
+                legacyInstance.remove({}, domain, challengeKey, (err: any) => {
+                    if (err) reject(err);
+                    else resolve();
+                });
+            });
+        },
+
+        // v4 might call get, legacy doesn't implement it usually, return null is safe
+        get: async () => { return null; }
+    };
+}
+
 // --- Types ---
 interface GreenlockInstance {
     httpsOptions: https.ServerOptions;
@@ -86,7 +124,7 @@ interface GreenlockInstance {
 }
 
 type ServerOptions = {
-    config: AppConfig
+    config: AppConfig;
     allowList: AllowList | null;
     geoFence: GeoFence | null;
 };
@@ -101,27 +139,28 @@ export async function startServer(opts: ServerOptions) {
         .filter((s): s is string => s !== null);
 
     // 1. INSTANTIATE CHALLENGE
-    const dnsChallenge = new CloudflareChallenge({
+    const legacyChallenge = new CloudflareChallenge({
         token: config.cloudflareToken,
         verifyPropagation: true,
         verbose: false
     });
 
-    // 2. MANAGEMENT PHASE (Fix: Await the creation)
+    // 2. WRAP CHALLENGE (Critical Fix)
+    const dnsChallenge = wrapLegacyDnsChallenge(legacyChallenge);
+
+    // 3. MANAGEMENT PHASE
     if (allowedHostPatterns.length > 0) {
-        // Greenlock.create() returns a Promise in v4!
         const gl = Greenlock.create({
             packageRoot: process.cwd(),
             configDir: "./greenlock.d",
             maintainerEmail: config.email,
         });
 
-        // Now gl is the instance, and we can access the manager
         await gl.manager.defaults({
             subscriberEmail: config.email,
             agreeToTerms: true,
             challenges: {
-                "dns-01": dnsChallenge
+                "dns-01": dnsChallenge // Use the wrapper
             }
         });
 
@@ -134,23 +173,23 @@ export async function startServer(opts: ServerOptions) {
                 });
                 console.log(`Registered domain with Greenlock: ${domain}`);
             } catch (e) {
-                // Ignore errors if domain is already registered
+                // Ignore "already registered"
             }
         }
     }
 
-    // 3. SERVING PHASE
+    // 4. SERVING PHASE
     const glx = GreenlockExpress.init({
         packageRoot: process.cwd(),
         configDir: "./greenlock.d",
         maintainerEmail: config.email,
         cluster: false,
         challenges: {
-            "dns-01": dnsChallenge
+            "dns-01": dnsChallenge // Use the wrapper
         }
     }) as unknown as GreenlockInstance;
 
-    // 4. HIJACK SNI (ClientHello Dropper)
+    // 5. HIJACK SNI (ClientHello Dropper)
     const httpsOptions = { ...glx.httpsOptions };
     const greenlockSNI = httpsOptions.SNICallback;
 
@@ -166,7 +205,7 @@ export async function startServer(opts: ServerOptions) {
         }
     };
 
-    // 5. EXPRESS APP
+    // 6. EXPRESS APP
     const app = express();
     app.set("trust proxy", config.trustProxy);
     app.disable('x-powered-by');
@@ -201,7 +240,7 @@ export async function startServer(opts: ServerOptions) {
         return res.status(200).type("text/plain").send(`OK. allowed ${ip}\n`);
     });
 
-    // 6. START SERVER
+    // 7. START SERVER
     const httpsServer = https.createServer(httpsOptions, app);
 
     httpsServer.listen(config.httpPort, config.httpBindHost, () => {

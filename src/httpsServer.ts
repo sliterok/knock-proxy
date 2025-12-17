@@ -14,7 +14,7 @@ import type { AllowList } from "./allowList";
 import type { GeoFence } from "./geoFence";
 import { normalizeIp } from "./ip";
 
-// --- Helpers ---
+// --- Helpers (Same as before) ---
 function headerValue(v: string | string[] | undefined) {
     if (!v) return null;
     if (Array.isArray(v)) return v[0] ?? null;
@@ -78,44 +78,50 @@ function dropConnection(socket: any) {
     }
 }
 
-// --- COMPATIBILITY WRAPPER (Fixes the undefined.undefined error) ---
-function wrapLegacyDnsChallenge(legacyInstance: any) {
-    return {
-        // Greenlock v4 calls 'init', legacy doesn't need it but we must provide it
-        init: async () => { return null; },
+// --- V4 PLUGIN ADAPTER (The Fix) ---
+// Greenlock v4 expects a module with a 'create' function.
+// We define this inline to bridge v4 to the legacy Cloudflare library.
+const CloudflareV4Plugin = {
+    create: (opts: any) => {
+        // Instantiate the legacy library
+        const legacy = new CloudflareChallenge({
+            token: opts.token,
+            verifyPropagation: true,
+            verbose: false
+        });
 
-        // Greenlock v4 passes a single object; Legacy expects (opts, domain, key, val, cb)
-        set: async (opts: any) => {
-            const domain = opts.identifier.value;         // e.g. "example.com"
-            const challengeKey = opts.challenge.dnsHost;  // e.g. "_acme-challenge.example.com"
-            const keyAuthorization = opts.challenge.keyAuthorization;
+        return {
+            init: async () => { return null; },
 
-            return new Promise<void>((resolve, reject) => {
-                // We pass {} as the first 'opts' arg to legacy, it usually ignores it
-                legacyInstance.set({}, domain, challengeKey, keyAuthorization, (err: any) => {
-                    if (err) reject(err);
-                    else resolve();
+            set: async (data: any) => {
+                const domain = data.identifier.value;
+                const challengeKey = data.challenge.dnsHost;
+                const keyAuthorization = data.challenge.keyAuthorization;
+
+                return new Promise<void>((resolve, reject) => {
+                    legacy.set({}, domain, challengeKey, keyAuthorization, (err: any) => {
+                        if (err) reject(err);
+                        else resolve();
+                    });
                 });
-            });
-        },
+            },
 
-        // Legacy expected (opts, domain, key, cb)
-        remove: async (opts: any) => {
-            const domain = opts.identifier.value;
-            const challengeKey = opts.challenge.dnsHost;
+            remove: async (data: any) => {
+                const domain = data.identifier.value;
+                const challengeKey = data.challenge.dnsHost;
 
-            return new Promise<void>((resolve, reject) => {
-                legacyInstance.remove({}, domain, challengeKey, (err: any) => {
-                    if (err) reject(err);
-                    else resolve();
+                return new Promise<void>((resolve, reject) => {
+                    legacy.remove({}, domain, challengeKey, (err: any) => {
+                        if (err) reject(err);
+                        else resolve();
+                    });
                 });
-            });
-        },
+            },
 
-        // v4 might call get, legacy doesn't implement it usually, return null is safe
-        get: async () => { return null; }
-    };
-}
+            get: async () => { return null; }
+        };
+    }
+};
 
 // --- Types ---
 interface GreenlockInstance {
@@ -138,17 +144,7 @@ export async function startServer(opts: ServerOptions) {
         .map(normalizeAllowedHostPattern)
         .filter((s): s is string => s !== null);
 
-    // 1. INSTANTIATE CHALLENGE
-    const legacyChallenge = new CloudflareChallenge({
-        token: config.cloudflareToken,
-        verifyPropagation: true,
-        verbose: false
-    });
-
-    // 2. WRAP CHALLENGE (Critical Fix)
-    const dnsChallenge = wrapLegacyDnsChallenge(legacyChallenge);
-
-    // 3. MANAGEMENT PHASE
+    // 1. MANAGEMENT PHASE
     if (allowedHostPatterns.length > 0) {
         const gl = Greenlock.create({
             packageRoot: process.cwd(),
@@ -156,11 +152,16 @@ export async function startServer(opts: ServerOptions) {
             maintainerEmail: config.email,
         });
 
+        // We pass the PLUGIN DEFINITION (CloudflareV4Plugin), not an instance.
+        // We also pass the options (token) alongside it.
         await gl.manager.defaults({
             subscriberEmail: config.email,
             agreeToTerms: true,
             challenges: {
-                "dns-01": dnsChallenge // Use the wrapper
+                "dns-01": {
+                    module: CloudflareV4Plugin, // Pass the factory object
+                    token: config.cloudflareToken // Options passed to .create()
+                }
             }
         });
 
@@ -171,25 +172,26 @@ export async function startServer(opts: ServerOptions) {
                     subject: domain,
                     altnames: [domain]
                 });
-                console.log(`Registered domain with Greenlock: ${domain}`);
-            } catch (e) {
-                // Ignore "already registered"
-            }
+                console.log(`Registered domain: ${domain}`);
+            } catch (e) { }
         }
     }
 
-    // 4. SERVING PHASE
+    // 2. SERVING PHASE
     const glx = GreenlockExpress.init({
         packageRoot: process.cwd(),
         configDir: "./greenlock.d",
         maintainerEmail: config.email,
         cluster: false,
         challenges: {
-            "dns-01": dnsChallenge // Use the wrapper
+            "dns-01": {
+                module: CloudflareV4Plugin,
+                token: config.cloudflareToken
+            }
         }
     }) as unknown as GreenlockInstance;
 
-    // 5. HIJACK SNI (ClientHello Dropper)
+    // 3. HIJACK SNI (ClientHello Dropper)
     const httpsOptions = { ...glx.httpsOptions };
     const greenlockSNI = httpsOptions.SNICallback;
 
@@ -205,7 +207,7 @@ export async function startServer(opts: ServerOptions) {
         }
     };
 
-    // 6. EXPRESS APP
+    // 4. EXPRESS APP
     const app = express();
     app.set("trust proxy", config.trustProxy);
     app.disable('x-powered-by');
@@ -240,7 +242,7 @@ export async function startServer(opts: ServerOptions) {
         return res.status(200).type("text/plain").send(`OK. allowed ${ip}\n`);
     });
 
-    // 7. START SERVER
+    // 5. START SERVER
     const httpsServer = https.createServer(httpsOptions, app);
 
     httpsServer.listen(config.httpPort, config.httpBindHost, () => {

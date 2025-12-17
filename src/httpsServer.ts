@@ -7,6 +7,7 @@ import path from "node:path";
 import Greenlock from "greenlock";
 // @ts-ignore
 import CloudflareChallenge from "acme-dns-01-cloudflare";
+import GreenlockStore from "greenlock-store-fs"
 
 import type { AppConfig } from "./config";
 import type { AllowList } from "./allowList";

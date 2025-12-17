@@ -6,15 +6,13 @@ import path from "node:path";
 // @ts-ignore
 import Greenlock from "@root/greenlock";
 import GreenlockExpress from "greenlock-express";
-// @ts-ignore
-import CloudflareChallenge from "acme-dns-01-cloudflare";
 
 import type { AppConfig } from "./config";
 import type { AllowList } from "./allowList";
 import type { GeoFence } from "./geoFence";
 import { normalizeIp } from "./ip";
 
-// --- Helpers (Same as before) ---
+// --- Helpers ---
 function headerValue(v: string | string[] | undefined) {
     if (!v) return null;
     if (Array.isArray(v)) return v[0] ?? null;
@@ -78,51 +76,6 @@ function dropConnection(socket: any) {
     }
 }
 
-// --- V4 PLUGIN ADAPTER (The Fix) ---
-// Greenlock v4 expects a module with a 'create' function.
-// We define this inline to bridge v4 to the legacy Cloudflare library.
-const CloudflareV4Plugin = {
-    create: (opts: any) => {
-        // Instantiate the legacy library
-        const legacy = new CloudflareChallenge({
-            token: opts.token,
-            verifyPropagation: true,
-            verbose: false
-        });
-
-        return {
-            init: async () => { return null; },
-
-            set: async (data: any) => {
-                const domain = data.identifier.value;
-                const challengeKey = data.challenge.dnsHost;
-                const keyAuthorization = data.challenge.keyAuthorization;
-
-                return new Promise<void>((resolve, reject) => {
-                    legacy.set({}, domain, challengeKey, keyAuthorization, (err: any) => {
-                        if (err) reject(err);
-                        else resolve();
-                    });
-                });
-            },
-
-            remove: async (data: any) => {
-                const domain = data.identifier.value;
-                const challengeKey = data.challenge.dnsHost;
-
-                return new Promise<void>((resolve, reject) => {
-                    legacy.remove({}, domain, challengeKey, (err: any) => {
-                        if (err) reject(err);
-                        else resolve();
-                    });
-                });
-            },
-
-            get: async () => { return null; }
-        };
-    }
-};
-
 // --- Types ---
 interface GreenlockInstance {
     httpsOptions: https.ServerOptions;
@@ -144,6 +97,10 @@ export async function startServer(opts: ServerOptions) {
         .map(normalizeAllowedHostPattern)
         .filter((s): s is string => s !== null);
 
+    // Define the path to the adapter we created
+    // This MUST be a relative string path so Greenlock can require() it.
+    const challengeModulePath = "./adapter.js";
+
     // 1. MANAGEMENT PHASE
     if (allowedHostPatterns.length > 0) {
         const gl = Greenlock.create({
@@ -152,15 +109,13 @@ export async function startServer(opts: ServerOptions) {
             maintainerEmail: config.email,
         });
 
-        // We pass the PLUGIN DEFINITION (CloudflareV4Plugin), not an instance.
-        // We also pass the options (token) alongside it.
         await gl.manager.defaults({
             subscriberEmail: config.email,
             agreeToTerms: true,
             challenges: {
                 "dns-01": {
-                    module: CloudflareV4Plugin, // Pass the factory object
-                    token: config.cloudflareToken // Options passed to .create()
+                    module: challengeModulePath,
+                    token: config.cloudflareToken
                 }
             }
         });
@@ -173,7 +128,9 @@ export async function startServer(opts: ServerOptions) {
                     altnames: [domain]
                 });
                 console.log(`Registered domain: ${domain}`);
-            } catch (e) { }
+            } catch (e) {
+                // Ignore "already registered"
+            }
         }
     }
 
@@ -185,7 +142,7 @@ export async function startServer(opts: ServerOptions) {
         cluster: false,
         challenges: {
             "dns-01": {
-                module: CloudflareV4Plugin,
+                module: challengeModulePath,
                 token: config.cloudflareToken
             }
         }

@@ -13,6 +13,8 @@ export type AppConfig = {
     allowListPath: string;
     allowListMaxPerSubnet: number;
     allowListSubnetStaleMs: number;
+    email: string
+    cloudflareToken?: string
 };
 
 function parseIntOrFallback(raw: string | undefined, fallback: number) {
@@ -86,6 +88,8 @@ export function loadConfig(env = process.env): AppConfig {
     const allowListPath = env.ALLOWLIST_PATH ?? "data/allowList.json";
     const allowListMaxPerSubnet = parseIntOrFallback(env.ALLOWLIST_MAX_PER_SUBNET, 100);
     const allowListSubnetStaleMs = parseIntOrFallback(env.ALLOWLIST_SUBNET_STALE_SEC, 7 * 24 * 60 * 60) * 1000;
+    const email = env.EMAIL ?? "admin@example.com"
+    const cloudflareToken = env.CLOUDFLARE_TOKEN;
 
     return {
         proxyPublicPort,
@@ -102,5 +106,7 @@ export function loadConfig(env = process.env): AppConfig {
         allowListPath,
         allowListMaxPerSubnet: Math.max(1, Math.min(10_000, allowListMaxPerSubnet)),
         allowListSubnetStaleMs: Math.max(60_000, allowListSubnetStaleMs),
+        email,
+        cloudflareToken
     };
 }

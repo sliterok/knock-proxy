@@ -15,12 +15,15 @@
   "packageManager": "pnpm@10.18.3",
   "devDependencies": {
     "@types/express": "^5.0.6",
+    "@types/greenlock-express": "^4.0.3",
     "@types/node": "^25.0.1",
     "esbuild": "^0.27.1"
   },
   "dependencies": {
+    "acme-dns-01-cloudflare": "^1.2.5",
     "dotenv": "^17.2.3",
     "express": "^5.2.1",
-    "geoip-country": "^5.0.202512052343"
+    "geoip-country": "^5.0.202512052343",
+    "greenlock-express": "^4.0.3"
   }
 }

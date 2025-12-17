@@ -3,17 +3,17 @@ import "dotenv/config";
 import { AllowList } from "./allowList";
 import { loadConfig } from "./config";
 import { GeoFence } from "./geoFence";
-import { startHttpServer } from "./httpServer";
+import { startServer } from "./httpsServer";
 import { startTcpGate } from "./tcpGate";
 
 async function main() {
     const config = loadConfig();
 
     const allowList = new AllowList({
-            persistPath: config.allowListPath,
-            maxEntriesPerSubnet: config.allowListMaxPerSubnet,
-            subnetStaleMs: config.allowListSubnetStaleMs,
-        });
+        persistPath: config.allowListPath,
+        maxEntriesPerSubnet: config.allowListMaxPerSubnet,
+        subnetStaleMs: config.allowListSubnetStaleMs,
+    });
 
     await allowList.loadFromDisk();
     setInterval(() => allowList.gc(), config.gcIntervalMs).unref();
@@ -24,7 +24,7 @@ async function main() {
         throw new Error("ACCESS_MODE requires GeoIP, but ALLOW_COUNTRIES is empty");
     }
 
-    startHttpServer({ config, allowList, geoFence });
+    startServer({ config, allowList, geoFence });
     startTcpGate({ config, allowList, geoFence });
 }
 

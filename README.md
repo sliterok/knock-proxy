@@ -65,7 +65,7 @@ By default:
 - `DANTE_PORT` (default `1081`)
 - `HTTP_PORT` (default `3000`)
 - `HTTP_BIND_HOST` (default `127.0.0.1`)
-- `HTTP_ALLOWED_HOSTS` (default unset) - comma/space separated allowed hosts for the HTTP server (matches `Host`, or `X-Forwarded-Host` when `TRUST_PROXY=true`)
+- `HTTP_ALLOWED_HOSTS` (default unset) - comma/space separated allowed hosts for the HTTP server (matches `Host`, or `X-Forwarded-Host` when `TRUST_PROXY=true`); non-matching hosts are dropped (no HTTP response)
 - `TRUST_PROXY` (default `true`) - respects `X-Forwarded-For` for `/unlock`
 - `ACCESS_MODE` (default depends on `ALLOW_COUNTRIES`)
 - `ALLOW_COUNTRIES` (enables GeoIP when set)

@@ -2,6 +2,7 @@ import express from "express";
 import type { Request, Response } from "express";
 import https from "node:https";
 import path from "node:path";
+import dns from "node:dns";
 
 // @ts-ignore
 import Greenlock from "greenlock";
@@ -14,7 +15,8 @@ import type { AllowList } from "./allowList";
 import type { GeoFence } from "./geoFence";
 import { normalizeIp } from "./ip";
 
-// --- Helpers (Same as before) ---
+// --- HELPERS ---
+
 function headerValue(v: string | string[] | undefined) {
     if (!v) return null;
     if (Array.isArray(v)) return v[0] ?? null;
@@ -78,7 +80,122 @@ function dropConnection(socket: any) {
     }
 }
 
-// --- Main Server ---
+// --- MANUAL CLOUDFLARE IMPLEMENTATION ---
+// This replaces the broken 'acme-dns-01-cloudflare' package.
+// It uses the native Node.js fetch API.
+
+const CF_API = "https://api.cloudflare.com/client/v4";
+
+async function getZoneId(domain: string, token: string): Promise<string | null> {
+    // Try to find the zone. If sub.example.com, we try sub.example.com, then example.com
+    const parts = domain.split(".");
+
+    while (parts.length >= 2) {
+        const zoneName = parts.join(".");
+        try {
+            const res = await fetch(`${CF_API}/zones?name=${zoneName}`, {
+                headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" }
+            });
+            const data: any = await res.json();
+            if (data.success && data.result && data.result.length > 0) {
+                return data.result[0].id;
+            }
+        } catch (e) {
+            console.error("CF API Error:", e);
+        }
+        parts.shift(); // remove sub-part and try parent
+    }
+    return null;
+}
+
+const ManualCloudflareChallenge = {
+    // Factory function needed by some versions, but we also define methods directly
+    create: function (options: any) { return ManualCloudflareChallenge; },
+
+    // 1. SET CHALLENGE (Add TXT Record)
+    set: function (opts: any, domain: string, key: string, val: string, cb: Function) {
+        (async () => {
+            try {
+                const token = opts.token || opts.cloudflareToken; // Handle different option locations
+                if (!token) throw new Error("Cloudflare Token missing");
+
+                const zoneId = await getZoneId(domain, token);
+                if (!zoneId) throw new Error(`Could not find Cloudflare Zone for ${domain}`);
+
+                const recordName = `_acme-challenge.${domain}`;
+                const content = key; // In v2/v3, 'key' argument is often the digest value needed
+
+                // Note: ACME v2 (Greenlock v2) arguments are sometimes (opts, domain, key, val, cb)
+                // where 'key' is the challenge token and 'val' is the SHA256 digest.
+                // Cloudflare needs the digest. 
+                // We use 'val' if provided, otherwise 'key'.
+                const txtValue = val || key;
+
+                const res = await fetch(`${CF_API}/zones/${zoneId}/dns_records`, {
+                    method: "POST",
+                    headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        type: "TXT",
+                        name: recordName,
+                        content: txtValue,
+                        ttl: 120
+                    })
+                });
+
+                const json: any = await res.json();
+                if (!json.success) {
+                    console.error("CF Create Error:", JSON.stringify(json.errors));
+                    throw new Error("Failed to create DNS record");
+                }
+
+                // Save record ID to opts so we can delete it later
+                if (!opts.dns_records) opts.dns_records = {};
+                opts.dns_records[domain] = json.result.id;
+
+                // Wait for propagation (basic delay)
+                console.log(`Waiting 30s for DNS propagation for ${domain}...`);
+                await new Promise(r => setTimeout(r, 30000));
+
+                cb(null);
+            } catch (e) {
+                cb(e);
+            }
+        })();
+    },
+
+    // 2. REMOVE CHALLENGE (Delete TXT Record)
+    remove: function (opts: any, domain: string, key: string, cb: Function) {
+        (async () => {
+            try {
+                const token = opts.token || opts.cloudflareToken;
+                const recordId = opts.dns_records ? opts.dns_records[domain] : null;
+
+                if (recordId) {
+                    const zoneId = await getZoneId(domain, token);
+                    if (zoneId) {
+                        await fetch(`${CF_API}/zones/${zoneId}/dns_records/${recordId}`, {
+                            method: "DELETE",
+                            headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" }
+                        });
+                    }
+                }
+                cb(null);
+            } catch (e) {
+                // Don't crash on cleanup errors
+                console.warn("Error removing DNS record:", e);
+                cb(null);
+            }
+        })();
+    },
+
+    // v2 sometimes calls this
+    get: function (opts: any, domain: string, key: string, cb: Function) {
+        cb(null);
+    }
+};
+
+
+// --- MAIN SERVER ---
 
 type ServerOptions = {
     config: AppConfig;
@@ -93,40 +210,35 @@ export async function startServer(opts: ServerOptions) {
         .map(normalizeAllowedHostPattern)
         .filter((s): s is string => s !== null);
 
-    // 1. Setup Store (v2 requirement)
+    // 1. Setup Store
     const store = GreenlockStore.create({
-        configDir: "./greenlock.d", // v2 stores certs here
+        configDir: "./greenlock.d",
         debug: false
     });
 
-    // 2. Setup Cloudflare Challenge
-    const dnsChallenge = new CloudflareChallenge({
-        token: config.cloudflareToken,
-        verifyPropagation: true,
-        verbose: false
-    });
-
-    // 3. Create Greenlock Instance (v2 Style)
+    // 2. Setup Greenlock with Manual Challenge
     const gl = Greenlock.create({
-        // Use the Production URL for real certs, or 'staging' for testing
         server: "https://acme-v02.api.letsencrypt.org/directory",
-        version: "draft-11", // Standard for v2
+        version: "draft-11",
         store: store,
         challenges: {
-            "dns-01": dnsChallenge
+            "dns-01": ManualCloudflareChallenge
         },
         challengeType: "dns-01",
         agreeTos: true,
         email: config.email,
-        debug: false
+        debug: true, // Enable debug to see what's happening
+
+        // Pass the token into the global config so our manual challenge can find it in 'opts'
+        cloudflareToken: config.cloudflareToken
     });
 
-    // 4. Register Domains
-    // v2 requires explicit registration call for every domain
+    // 3. Register Domains
     const domainsToRegister = allowedHostPatterns.filter(h => !h.startsWith("*") && !h.startsWith("."));
 
     for (const domain of domainsToRegister) {
         try {
+            console.log(`Requesting certificate for: ${domain}`);
             await gl.register({
                 domains: [domain],
                 email: config.email,
@@ -134,25 +246,21 @@ export async function startServer(opts: ServerOptions) {
                 rsaKeySize: 2048,
                 challengeType: "dns-01"
             });
-            console.log(`Verified/Registered domain: ${domain}`);
+            console.log(`Certificate active for: ${domain}`);
         } catch (e) {
             console.error(`Error registering ${domain}:`, e);
         }
     }
 
-    // 5. HIJACK SNI (ClientHello Dropper)
-    // In v2, we get the TLS options object directly.
+    // 4. HIJACK SNI (ClientHello Dropper)
     const httpsOptions = { ...gl.tlsOptions };
     const originalSNI = httpsOptions.SNICallback;
 
     httpsOptions.SNICallback = (servername: string, cb: (err: Error | null, ctx?: any) => void) => {
-        // A. CHECK WHITELIST
         if (!servername || !isHostnameAllowed(servername, allowedHostPatterns)) {
-            // Drop connection immediately during handshake
             return cb(new Error("Connection Dropped"));
         }
 
-        // B. PASS TO GREENLOCK
         if (originalSNI) {
             return originalSNI(servername, cb);
         } else {
@@ -160,12 +268,11 @@ export async function startServer(opts: ServerOptions) {
         }
     };
 
-    // 6. EXPRESS APP
+    // 5. EXPRESS APP
     const app = express();
     app.set("trust proxy", config.trustProxy);
     app.disable('x-powered-by');
 
-    // Host Header Defense
     if (allowedHostPatterns.length > 0) {
         app.use((req, res, next) => {
             const hostname = headerValue(req.headers["host"]);
@@ -196,7 +303,7 @@ export async function startServer(opts: ServerOptions) {
         return res.status(200).type("text/plain").send(`OK. allowed ${ip}\n`);
     });
 
-    // 7. START SERVER
+    // 6. START SERVER
     const httpsServer = https.createServer(httpsOptions, app);
 
     httpsServer.listen(config.httpPort, config.httpBindHost, () => {

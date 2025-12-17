@@ -5,14 +5,15 @@ import path from "node:path";
 
 // @ts-ignore
 import Greenlock from "@root/greenlock";
-import GreenlockExpress from "greenlock-express";
+// @ts-ignore
+import CloudflareChallenge from "acme-dns-01-cloudflare";
 
 import type { AppConfig } from "./config";
 import type { AllowList } from "./allowList";
 import type { GeoFence } from "./geoFence";
 import { normalizeIp } from "./ip";
 
-// --- Helpers ---
+// --- Helpers (Same as before) ---
 function headerValue(v: string | string[] | undefined) {
     if (!v) return null;
     if (Array.isArray(v)) return v[0] ?? null;
@@ -76,19 +77,13 @@ function dropConnection(socket: any) {
     }
 }
 
-// --- Types ---
-interface GreenlockInstance {
-    httpsOptions: https.ServerOptions;
-    serve: (app: any) => void;
-}
+// --- Main Server ---
 
 type ServerOptions = {
     config: AppConfig;
     allowList: AllowList | null;
     geoFence: GeoFence | null;
 };
-
-// --- Main Server ---
 
 export async function startServer(opts: ServerOptions) {
     const { config, allowList, geoFence } = opts;
@@ -97,78 +92,79 @@ export async function startServer(opts: ServerOptions) {
         .map(normalizeAllowedHostPattern)
         .filter((s): s is string => s !== null);
 
-    // Define the path to the adapter we created
-    // This MUST be a relative string path so Greenlock can require() it.
-    const challengeModulePath = "./adapter.js";
+    // 1. Setup Store (v2 requirement)
+    const store = GreenlockStore.create({
+        configDir: "./greenlock.d", // v2 stores certs here
+        debug: false
+    });
 
-    // 1. MANAGEMENT PHASE
-    if (allowedHostPatterns.length > 0) {
-        const gl = Greenlock.create({
-            packageRoot: process.cwd(),
-            configDir: "./greenlock.d",
-            maintainerEmail: config.email,
-        });
+    // 2. Setup Cloudflare Challenge
+    const dnsChallenge = new CloudflareChallenge({
+        token: config.cloudflareToken,
+        verifyPropagation: true,
+        verbose: false
+    });
 
-        await gl.manager.defaults({
-            subscriberEmail: config.email,
-            agreeToTerms: true,
-            challenges: {
-                "dns-01": {
-                    module: challengeModulePath,
-                    token: config.cloudflareToken
-                }
-            }
-        });
+    // 3. Create Greenlock Instance (v2 Style)
+    const gl = Greenlock.create({
+        // Use the Production URL for real certs, or 'staging' for testing
+        server: "https://acme-v02.api.letsencrypt.org/directory",
+        version: "draft-11", // Standard for v2
+        store: store,
+        challenges: {
+            "dns-01": dnsChallenge
+        },
+        challengeType: "dns-01",
+        agreeTos: true,
+        email: config.email,
+        debug: false
+    });
 
-        const domainsToRegister = allowedHostPatterns.filter(h => !h.startsWith("*") && !h.startsWith("."));
-        for (const domain of domainsToRegister) {
-            try {
-                await gl.add({
-                    subject: domain,
-                    altnames: [domain]
-                });
-                console.log(`Registered domain: ${domain}`);
-            } catch (e) {
-                // Ignore "already registered"
-            }
+    // 4. Register Domains
+    // v2 requires explicit registration call for every domain
+    const domainsToRegister = allowedHostPatterns.filter(h => !h.startsWith("*") && !h.startsWith("."));
+
+    for (const domain of domainsToRegister) {
+        try {
+            await gl.register({
+                domains: [domain],
+                email: config.email,
+                agreeTos: true,
+                rsaKeySize: 2048,
+                challengeType: "dns-01"
+            });
+            console.log(`Verified/Registered domain: ${domain}`);
+        } catch (e) {
+            console.error(`Error registering ${domain}:`, e);
         }
     }
 
-    // 2. SERVING PHASE
-    const glx = GreenlockExpress.init({
-        packageRoot: process.cwd(),
-        configDir: "./greenlock.d",
-        maintainerEmail: config.email,
-        cluster: false,
-        challenges: {
-            "dns-01": {
-                module: challengeModulePath,
-                token: config.cloudflareToken
-            }
-        }
-    }) as unknown as GreenlockInstance;
-
-    // 3. HIJACK SNI (ClientHello Dropper)
-    const httpsOptions = { ...glx.httpsOptions };
-    const greenlockSNI = httpsOptions.SNICallback;
+    // 5. HIJACK SNI (ClientHello Dropper)
+    // In v2, we get the TLS options object directly.
+    const httpsOptions = { ...gl.tlsOptions };
+    const originalSNI = httpsOptions.SNICallback;
 
     httpsOptions.SNICallback = (servername: string, cb: (err: Error | null, ctx?: any) => void) => {
+        // A. CHECK WHITELIST
         if (!servername || !isHostnameAllowed(servername, allowedHostPatterns)) {
+            // Drop connection immediately during handshake
             return cb(new Error("Connection Dropped"));
         }
 
-        if (greenlockSNI) {
-            return greenlockSNI(servername, cb);
+        // B. PASS TO GREENLOCK
+        if (originalSNI) {
+            return originalSNI(servername, cb);
         } else {
             cb(null, undefined);
         }
     };
 
-    // 4. EXPRESS APP
+    // 6. EXPRESS APP
     const app = express();
     app.set("trust proxy", config.trustProxy);
     app.disable('x-powered-by');
 
+    // Host Header Defense
     if (allowedHostPatterns.length > 0) {
         app.use((req, res, next) => {
             const hostname = headerValue(req.headers["host"]);
@@ -199,7 +195,7 @@ export async function startServer(opts: ServerOptions) {
         return res.status(200).type("text/plain").send(`OK. allowed ${ip}\n`);
     });
 
-    // 5. START SERVER
+    // 7. START SERVER
     const httpsServer = https.createServer(httpsOptions, app);
 
     httpsServer.listen(config.httpPort, config.httpBindHost, () => {

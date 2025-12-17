@@ -1,18 +1,14 @@
 import express from "express";
 import https from "node:https";
 import path from "node:path";
-
-// --- Legacy Require Imports ---
-// We use require() to avoid TS errors with these older, untyped packages
-const GreenlockExpress = require("greenlock-express");
-const CloudflareChallenge = require("acme-dns-01-cloudflare");
+import GreenlockExpress from "greenlock-express"
+// @ts-ignore
+import CloudflareChallenge from "acme-dns-01-cloudflare"
 
 import type { AppConfig } from "./config";
 import type { AllowList } from "./allowList";
 import type { GeoFence } from "./geoFence";
 import { normalizeIp } from "./ip";
-
-// --- Helpers ---
 
 function headerValue(v: string | string[] | undefined) {
     if (!v) return null;
@@ -73,7 +69,6 @@ function isHostnameAllowed(hostname: string, allowedPatterns: string[]) {
     return false;
 }
 
-// --- Connection Dropper ---
 function dropConnection(socket: any) {
     try {
         if (typeof socket.resetAndDestroy === "function") socket.resetAndDestroy();
@@ -83,9 +78,7 @@ function dropConnection(socket: any) {
     }
 }
 
-// --- Main Server ---
 
-// We extend the config type because your config.ts doesn't have the secrets
 type ServerOptions = {
     config: AppConfig
     allowList: AllowList | null;
@@ -116,7 +109,7 @@ export async function startServer(opts: ServerOptions) {
         challenges: {
             "dns-01": dnsChallenge
         }
-    });
+    } as GreenlockExpress.Options);
 
     // 4. REGISTER SITES (The missing step!)
     // We iterate over your allowed hosts and tell Greenlock to manage them.

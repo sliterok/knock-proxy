@@ -4,10 +4,9 @@ import https from "node:https";
 import path from "node:path";
 import dns from "node:dns";
 
+
 // @ts-ignore
 import Greenlock from "greenlock";
-// @ts-ignore
-import CloudflareChallenge from "acme-dns-01-cloudflare";
 import GreenlockStore from "greenlock-store-fs"
 
 import type { AppConfig } from "./config";
@@ -15,8 +14,7 @@ import type { AllowList } from "./allowList";
 import type { GeoFence } from "./geoFence";
 import { normalizeIp } from "./ip";
 
-// --- HELPERS ---
-
+// --- Helpers ---
 function headerValue(v: string | string[] | undefined) {
     if (!v) return null;
     if (Array.isArray(v)) return v[0] ?? null;
@@ -80,16 +78,13 @@ function dropConnection(socket: any) {
     }
 }
 
-// --- MANUAL CLOUDFLARE IMPLEMENTATION ---
-// This replaces the broken 'acme-dns-01-cloudflare' package.
-// It uses the native Node.js fetch API.
+// --- MANUAL CLOUDFLARE IMPLEMENTATION (Fixed) ---
 
 const CF_API = "https://api.cloudflare.com/client/v4";
 
 async function getZoneId(domain: string, token: string): Promise<string | null> {
-    // Try to find the zone. If sub.example.com, we try sub.example.com, then example.com
     const parts = domain.split(".");
-
+    // Walk up the domain tree to find the Zone (e.g. for _greenlock.sub.example.com, try example.com)
     while (parts.length >= 2) {
         const zoneName = parts.join(".");
         try {
@@ -98,38 +93,40 @@ async function getZoneId(domain: string, token: string): Promise<string | null> 
             });
             const data: any = await res.json();
             if (data.success && data.result && data.result.length > 0) {
-                return data.result[0].id;
+                // Ensure precise match to avoid sub-zone confusion
+                const zone = data.result.find((z: any) => z.name === zoneName);
+                if (zone) return zone.id;
             }
-        } catch (e) {
-            console.error("CF API Error:", e);
-        }
-        parts.shift(); // remove sub-part and try parent
+        } catch (e) { }
+        parts.shift();
     }
     return null;
 }
 
 const ManualCloudflareChallenge = {
-    // Factory function needed by some versions, but we also define methods directly
     create: function (options: any) { return ManualCloudflareChallenge; },
 
-    // 1. SET CHALLENGE (Add TXT Record)
     set: function (opts: any, domain: string, key: string, val: string, cb: Function) {
         (async () => {
             try {
-                const token = opts.token || opts.cloudflareToken; // Handle different option locations
+                const token = opts.token || opts.cloudflareToken;
                 if (!token) throw new Error("Cloudflare Token missing");
 
                 const zoneId = await getZoneId(domain, token);
                 if (!zoneId) throw new Error(`Could not find Cloudflare Zone for ${domain}`);
 
-                const recordName = `_acme-challenge.${domain}`;
-                const content = key; // In v2/v3, 'key' argument is often the digest value needed
+                // --- FIX: DETECT DRY RUN ---
+                // Greenlock dry-run domains look like '_greenlock-dryrun-xxxx.example.com'
+                // Real challenges are just 'example.com' and need '_acme-challenge' prepended.
+                let recordName = domain;
+                if (!domain.startsWith("_greenlock-dryrun")) {
+                    recordName = `_acme-challenge.${domain}`;
+                }
 
-                // Note: ACME v2 (Greenlock v2) arguments are sometimes (opts, domain, key, val, cb)
-                // where 'key' is the challenge token and 'val' is the SHA256 digest.
-                // Cloudflare needs the digest. 
-                // We use 'val' if provided, otherwise 'key'.
+                // Cloudflare needs the digest (val), or key if val is missing
                 const txtValue = val || key;
+
+                console.log(`Setting TXT record: ${recordName} -> ${txtValue}`);
 
                 const res = await fetch(`${CF_API}/zones/${zoneId}/dns_records`, {
                     method: "POST",
@@ -144,17 +141,20 @@ const ManualCloudflareChallenge = {
 
                 const json: any = await res.json();
                 if (!json.success) {
-                    console.error("CF Create Error:", JSON.stringify(json.errors));
-                    throw new Error("Failed to create DNS record");
+                    // Ignore "Record already exists" errors (code 81057) to be safe
+                    const isDup = json.errors.some((e: any) => e.code === 81057);
+                    if (!isDup) {
+                        console.error("CF Create Error:", JSON.stringify(json.errors));
+                        throw new Error("Failed to create DNS record");
+                    }
+                } else {
+                    // Save ID for cleanup
+                    if (!opts.dns_records) opts.dns_records = {};
+                    opts.dns_records[domain] = json.result.id;
                 }
 
-                // Save record ID to opts so we can delete it later
-                if (!opts.dns_records) opts.dns_records = {};
-                opts.dns_records[domain] = json.result.id;
-
-                // Wait for propagation (basic delay)
-                console.log(`Waiting 30s for DNS propagation for ${domain}...`);
-                await new Promise(r => setTimeout(r, 30000));
+                console.log(`Waiting 20s for propagation...`);
+                await new Promise(r => setTimeout(r, 20000));
 
                 cb(null);
             } catch (e) {
@@ -163,7 +163,6 @@ const ManualCloudflareChallenge = {
         })();
     },
 
-    // 2. REMOVE CHALLENGE (Delete TXT Record)
     remove: function (opts: any, domain: string, key: string, cb: Function) {
         (async () => {
             try {
@@ -177,18 +176,16 @@ const ManualCloudflareChallenge = {
                             method: "DELETE",
                             headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" }
                         });
+                        console.log(`Cleaned up record for ${domain}`);
                     }
                 }
                 cb(null);
             } catch (e) {
-                // Don't crash on cleanup errors
-                console.warn("Error removing DNS record:", e);
                 cb(null);
             }
         })();
     },
 
-    // v2 sometimes calls this
     get: function (opts: any, domain: string, key: string, cb: Function) {
         cb(null);
     }
@@ -198,7 +195,7 @@ const ManualCloudflareChallenge = {
 // --- MAIN SERVER ---
 
 type ServerOptions = {
-    config: AppConfig;
+    config: AppConfig
     allowList: AllowList | null;
     geoFence: GeoFence | null;
 };
@@ -206,39 +203,42 @@ type ServerOptions = {
 export async function startServer(opts: ServerOptions) {
     const { config, allowList, geoFence } = opts;
 
+    // 1. FORCE DNS TO CLOUDFLARE (Fixes ENOTFOUND errors)
+    // This forces Node to use 1.1.1.1 instead of your local/docker resolver
+    // which might be caching the "Not Found" response.
+    try {
+        dns.setServers(["1.1.1.1", "8.8.8.8"]);
+    } catch (e) {
+        console.warn("Could not set custom DNS servers:", e);
+    }
+
     const allowedHostPatterns = config.httpAllowedHosts
         .map(normalizeAllowedHostPattern)
         .filter((s): s is string => s !== null);
 
-    // 1. Setup Store
     const store = GreenlockStore.create({
         configDir: "./greenlock.d",
         debug: false
     });
 
-    // 2. Setup Greenlock with Manual Challenge
     const gl = Greenlock.create({
         server: "https://acme-v02.api.letsencrypt.org/directory",
         version: "draft-11",
         store: store,
-        challenges: {
-            "dns-01": ManualCloudflareChallenge
-        },
+        challenges: { "dns-01": ManualCloudflareChallenge },
         challengeType: "dns-01",
         agreeTos: true,
         email: config.email,
-        debug: true, // Enable debug to see what's happening
-
-        // Pass the token into the global config so our manual challenge can find it in 'opts'
+        debug: true,
         cloudflareToken: config.cloudflareToken
     });
 
-    // 3. Register Domains
+    // Register Domains
     const domainsToRegister = allowedHostPatterns.filter(h => !h.startsWith("*") && !h.startsWith("."));
 
     for (const domain of domainsToRegister) {
         try {
-            console.log(`Requesting certificate for: ${domain}`);
+            console.log(`Ensuring certificate for: ${domain}`);
             await gl.register({
                 domains: [domain],
                 email: config.email,
@@ -246,13 +246,12 @@ export async function startServer(opts: ServerOptions) {
                 rsaKeySize: 2048,
                 challengeType: "dns-01"
             });
-            console.log(`Certificate active for: ${domain}`);
         } catch (e) {
-            console.error(`Error registering ${domain}:`, e);
+            console.error(`Certificate Error (${domain}):`, e);
         }
     }
 
-    // 4. HIJACK SNI (ClientHello Dropper)
+    // Hijack SNI
     const httpsOptions = { ...gl.tlsOptions };
     const originalSNI = httpsOptions.SNICallback;
 
@@ -260,15 +259,11 @@ export async function startServer(opts: ServerOptions) {
         if (!servername || !isHostnameAllowed(servername, allowedHostPatterns)) {
             return cb(new Error("Connection Dropped"));
         }
-
-        if (originalSNI) {
-            return originalSNI(servername, cb);
-        } else {
-            cb(null, undefined);
-        }
+        if (originalSNI) return originalSNI(servername, cb);
+        cb(null, undefined);
     };
 
-    // 5. EXPRESS APP
+    // Express App
     const app = express();
     app.set("trust proxy", config.trustProxy);
     app.disable('x-powered-by');
@@ -303,7 +298,6 @@ export async function startServer(opts: ServerOptions) {
         return res.status(200).type("text/plain").send(`OK. allowed ${ip}\n`);
     });
 
-    // 6. START SERVER
     const httpsServer = https.createServer(httpsOptions, app);
 
     httpsServer.listen(config.httpPort, config.httpBindHost, () => {

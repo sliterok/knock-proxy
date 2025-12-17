@@ -24,6 +24,7 @@
     "dotenv": "^17.2.3",
     "express": "^5.2.1",
     "geoip-country": "^5.0.202512052343",
+    "greenlock": "^2.8.9",
     "greenlock-express": "^4.0.3"
   }
 }
